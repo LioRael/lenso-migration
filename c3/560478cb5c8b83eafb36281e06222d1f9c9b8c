@@ -1,0 +1,55 @@
+crates/lenso-migration-d1/README.md
+  s_21258fca71be0b::t_e983ee1f0ae966 1-52
+crates/lenso-migration-d1/tests/lifecycle.rs
+  s_21258fca71be0b::t_b85b19de6cc76a 1-115
+  s_21258fca71be0b::t_511def442aa74d 116-347
+crates/lenso-migration-d1/src/lib.rs
+  s_21258fca71be0b::t_18e849aecb2c17 1-194
+  s_21258fca71be0b::t_3496ae0b685b2b 195-318
+.github/workflows/ci.yml
+  s_21258fca71be0b::t_5b86e84a24e955 33,36-38
+Cargo.lock
+  s_21258fca71be0b::t_a35eb4dba5488c 56-61,263-274,296-310,327-337,355-365,384,387,614-624,629-648,660-670,775-780,854-878,913-918,1021-1032,1378-1383,1396-1440
+Cargo.toml
+  s_21258fca71be0b::t_074a393ca944b3 1-4,7,18
+README.md
+  s_21258fca71be0b::t_ddfff647dc2eba 21-38,41,48-50,64,69,115-117,121-126
+crates/lenso-migration-d1/Cargo.toml
+  s_21258fca71be0b::t_9d7b63678b57df 1-23
+crates/lenso-migration/Cargo.toml
+  s_21258fca71be0b::t_593987be16912d 1-27
+crates/lenso-migration/README.md
+  s_21258fca71be0b::t_514c4a3b31f876 1-41
+crates/lenso-migration/src/lib.rs
+  s_21258fca71be0b::t_5597c99c599770 1-248
+crates/lenso-migration/tests/history.rs
+  s_21258fca71be0b::t_dee0ec44db705f 1-155
+docs/release-process.md
+  s_21258fca71be0b::t_5e96b1915eea72 1-23
+src/lib.rs
+  s_21258fca71be0b::t_458d0b695900ff 13,15
+src/lifecycle.rs
+  s_21258fca71be0b::t_ca18bff5e7dc26 3-4,115,129-131,170-172,176-177,210-212,305-311,314-316,362,374
+src/plan.rs
+  s_21258fca71be0b::t_a2092d70d90413 3,6,12,23-31,41,45-54,64,107-112,114-125
+tests/postgres_acceptance.rs
+  s_21258fca71be0b::t_b13f7842bee8a6 258-336
+tests/sql_file_migrations.rs
+  s_21258fca71be0b::t_293b997dda49db 7,12
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c3560478cb5c8b83eafb36281e06222d1f9c9b8c",
+  "prompts": {},
+  "sessions": {
+    "s_21258fca71be0b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0a45b-2d5b-75d1-bc5a-2923a5486851",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
