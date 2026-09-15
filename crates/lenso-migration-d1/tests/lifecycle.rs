@@ -25,8 +25,22 @@ fn plan(count: usize) -> Plan {
     Plan::new("example", &SQL[..count], &COMMON[..count], None).unwrap()
 }
 
+fn legacy_plan(count: usize) -> Plan {
+    Plan::new(
+        "example",
+        &SQL[..count],
+        &COMMON[..count],
+        Some(LegacySchema {
+            table: "legacy",
+            fingerprint: "expected",
+        }),
+    )
+    .unwrap()
+}
+
 struct Db {
     conn: RefCell<Connection>,
+    calls: Cell<usize>,
     writes: Cell<usize>,
     lose_reply: Cell<bool>,
     stale: Cell<bool>,
@@ -37,6 +51,7 @@ impl Db {
     fn new() -> Self {
         Self {
             conn: RefCell::new(Connection::open_in_memory().unwrap()),
+            calls: Cell::new(0),
             writes: Cell::new(0),
             lose_reply: Cell::new(false),
             stale: Cell::new(false),
@@ -54,8 +69,12 @@ impl Transport for Db {
         statements: Vec<Statement>,
     ) -> LocalBoxFuture<'_, Result<Vec<Vec<Value>>, Error>> {
         Box::pin(async move {
+            self.calls.set(self.calls.get() + 1);
             let mut conn = self.conn.borrow_mut();
-            let writing = statements.len() > 1;
+            let writing = statements.iter().any(|statement| {
+                conn.prepare(&statement.sql)
+                    .is_ok_and(|stmt| !stmt.readonly())
+            });
             if writing {
                 self.writes.set(self.writes.get() + 1);
                 if self.stale.replace(false) {
@@ -115,6 +134,196 @@ impl Transport for Db {
             Ok(output)
         })
     }
+}
+
+#[test]
+fn current_verification_batches_history_reads_without_writes_or_caching() {
+    block_on(async {
+        let db = Db::new();
+        plan(2).setup(&db).await.unwrap();
+        db.sql("CREATE TABLE legacy(version INTEGER,fingerprint TEXT);INSERT INTO legacy VALUES(1,'expected');PRAGMA query_only=ON");
+        let writes = db.writes.get();
+        for (plan, expected_calls) in [(plan(2), 1), (legacy_plan(2), 2)] {
+            for _ in 0..2 {
+                db.calls.set(0);
+                plan.verify(&db).await.unwrap();
+                assert_eq!(db.calls.get(), expected_calls);
+                assert_eq!(db.writes.get(), writes);
+            }
+        }
+        db.sql(
+            "PRAGMA query_only=OFF;UPDATE legacy SET fingerprint='changed';PRAGMA query_only=ON",
+        );
+        assert!(matches!(
+            legacy_plan(2).verify(&db).await,
+            Err(Error::History)
+        ));
+        db.sql("PRAGMA query_only=OFF;DELETE FROM _lenso_migrations WHERE version=2;PRAGMA query_only=ON");
+        assert!(matches!(
+            plan(2).verify(&db).await,
+            Err(Error::UpgradeRequired)
+        ));
+        assert_eq!(db.writes.get(), writes);
+    });
+}
+
+#[test]
+fn history_errors_still_precede_legacy_marker_errors() {
+    block_on(async {
+        for missing_marker in [false, true] {
+            for (mutation, expected) in [
+                ("DROP TABLE _lenso_migrations", Error::SetupRequired),
+                ("DELETE FROM _lenso_migrations", Error::SetupRequired),
+                (
+                    "UPDATE _lenso_migrations SET owner='other'",
+                    Error::SetupRequired,
+                ),
+                (
+                    "DELETE FROM _lenso_migrations WHERE version=2",
+                    Error::UpgradeRequired,
+                ),
+                (
+                    "DELETE FROM _lenso_migrations WHERE version=1",
+                    Error::History,
+                ),
+                (
+                    "UPDATE _lenso_migrations SET version=3 WHERE version=2",
+                    Error::History,
+                ),
+                (
+                    "UPDATE _lenso_migrations SET version='malformed' WHERE version=1",
+                    Error::History,
+                ),
+                (
+                    "UPDATE _lenso_migrations SET name='renamed' WHERE version=1",
+                    Error::History,
+                ),
+                (
+                    "UPDATE _lenso_migrations SET checksum='changed' WHERE version=1",
+                    Error::History,
+                ),
+                (
+                    "ALTER TABLE _lenso_migrations RENAME TO old_ledger;CREATE TABLE _lenso_migrations AS SELECT * FROM old_ledger;INSERT INTO _lenso_migrations SELECT * FROM old_ledger",
+                    Error::History,
+                ),
+                (
+                    "ALTER TABLE _lenso_migrations RENAME TO old_ledger;CREATE TABLE _lenso_migrations AS SELECT * FROM old_ledger;UPDATE _lenso_migrations SET backend='pg'",
+                    Error::SetupRequired,
+                ),
+                (
+                    "ALTER TABLE _lenso_migrations RENAME TO old_ledger;CREATE TABLE _lenso_migrations AS SELECT * FROM old_ledger;UPDATE _lenso_migrations SET checksum=NULL",
+                    Error::History,
+                ),
+                (
+                    "ALTER TABLE _lenso_migrations RENAME TO old_ledger;CREATE VIEW _lenso_migrations AS SELECT * FROM old_ledger",
+                    Error::SetupRequired,
+                ),
+                (
+                    "ALTER TABLE _lenso_migrations DROP COLUMN checksum",
+                    Error::Transport,
+                ),
+            ] {
+                let db = Db::new();
+                plan(2).setup(&db).await.unwrap();
+                if !missing_marker {
+                    db.sql("CREATE TABLE legacy(version INTEGER,fingerprint TEXT);INSERT INTO legacy VALUES(1,'wrong')");
+                }
+                db.sql(mutation);
+                db.sql("PRAGMA query_only=ON");
+                let writes = db.writes.get();
+                let actual = legacy_plan(2).verify(&db).await.unwrap_err();
+                assert_eq!(
+                    std::mem::discriminant(&actual),
+                    std::mem::discriminant(&expected),
+                    "{mutation}, missing_marker={missing_marker}: {actual}"
+                );
+                assert_eq!(db.writes.get(), writes);
+            }
+        }
+    });
+}
+
+#[test]
+fn current_history_requires_the_exact_legacy_marker() {
+    block_on(async {
+        for (marker, expected) in [
+            ("", Error::Transport),
+            ("CREATE TABLE legacy(version INTEGER)", Error::Transport),
+            ("CREATE TABLE legacy(version,fingerprint)", Error::History),
+            (
+                "CREATE TABLE legacy(version,fingerprint);INSERT INTO legacy VALUES(1,'wrong')",
+                Error::History,
+            ),
+            (
+                "CREATE TABLE legacy(version,fingerprint);INSERT INTO legacy VALUES(2,'expected')",
+                Error::History,
+            ),
+            (
+                "CREATE TABLE legacy(version,fingerprint);INSERT INTO legacy VALUES('1','expected')",
+                Error::History,
+            ),
+            (
+                "CREATE TABLE legacy(version,fingerprint);INSERT INTO legacy VALUES(1,NULL)",
+                Error::History,
+            ),
+            (
+                "CREATE TABLE legacy(version,fingerprint);INSERT INTO legacy VALUES(1,'expected'),(1,'expected')",
+                Error::History,
+            ),
+        ] {
+            let db = Db::new();
+            plan(2).setup(&db).await.unwrap();
+            db.sql(marker);
+            db.sql("PRAGMA query_only=ON");
+            let writes = db.writes.get();
+            let actual = legacy_plan(2).verify(&db).await.unwrap_err();
+            assert_eq!(
+                std::mem::discriminant(&actual),
+                std::mem::discriminant(&expected),
+                "{marker}: {actual}"
+            );
+            assert_eq!(db.writes.get(), writes);
+        }
+    });
+}
+
+#[test]
+fn verification_preserves_transport_failures_and_rejects_malformed_receipts() {
+    struct Replies(RefCell<std::collections::VecDeque<Result<Vec<Vec<Value>>, Error>>>);
+    impl Transport for Replies {
+        fn batch(
+            &self,
+            _statements: Vec<Statement>,
+        ) -> LocalBoxFuture<'_, Result<Vec<Vec<Value>>, Error>> {
+            Box::pin(async { self.0.borrow_mut().pop_front().expect("unexpected batch") })
+        }
+    }
+
+    block_on(async {
+        for replies in [
+            vec![Ok(vec![])],
+            vec![Ok(vec![vec![]])],
+            vec![Ok(vec![vec![], vec![], vec![]])],
+            vec![
+                Err(Error::Transport),
+                Ok(vec![vec![json!({"name": "_lenso_migrations"})]]),
+            ],
+            vec![Err(Error::Transport), Err(Error::Transport)],
+            vec![Err(Error::Transport), Ok(vec![])],
+        ] {
+            let db = Replies(RefCell::new(replies.into()));
+            assert!(matches!(plan(1).verify(&db).await, Err(Error::Transport)));
+            assert!(db.0.borrow().is_empty());
+        }
+        let db = Replies(RefCell::new(
+            vec![Err(Error::Transport), Ok(vec![vec![]])].into(),
+        ));
+        assert!(matches!(
+            plan(1).verify(&db).await,
+            Err(Error::SetupRequired)
+        ));
+        assert!(db.0.borrow().is_empty());
+    });
 }
 
 #[test]
