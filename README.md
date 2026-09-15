@@ -1,4 +1,17 @@
-# lenso-postgres-kit
+# Lenso Migration
+
+Shared migration planning and backend adapters for Lenso Plugins.
+
+| Crate | Responsibility |
+| --- | --- |
+| `lenso-migration` | Immutable plans, checksums and applied-history validation |
+| `lenso-migration-d1` | Explicit D1 setup, verification, upgrade and legacy adoption |
+| `lenso-postgres-kit` | PostgreSQL schema lifecycle, roles, locking and transactions |
+
+Plugins retain ownership of their SQL. The repository is named `lenso-migration`;
+crate names and published version identities remain unchanged.
+
+## PostgreSQL adapter
 
 `lenso-postgres-kit` gives a stateful Lenso Plugin an explicit lifecycle for
 its own PostgreSQL schema. It is intentionally not a shared State Plugin, a
