@@ -137,3 +137,9 @@ core history model through an injected primary-batch transport. It provides
 explicit setup, upgrade and legacy adoption while keeping runtime verification
 read-only. Its lifecycle tests include rollback, concurrent-state guards and
 long migration histories.
+
+On a current managed database, D1 verification reads ledger existence and the
+complete owner history in one primary batch, then checks the configured legacy
+marker in a second batch. Without a legacy marker it uses one batch. Failed
+history batches probe ledger existence to distinguish missing setup from storage
+failure. Verification does not cache results or write to the database.

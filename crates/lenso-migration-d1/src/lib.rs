@@ -125,19 +125,60 @@ impl Plan {
         })
     }
 
-    async fn history(&self, db: &impl Transport) -> Result<Option<Vec<AppliedMigration>>, Error> {
-        let rows = query(
-            db,
-            Statement::new(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name=?1",
-                vec![json!(LEDGER)],
-            ),
+    fn ledger_query() -> Statement {
+        Statement::new(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?1",
+            vec![json!(LEDGER)],
         )
-        .await?;
+    }
+
+    fn history_query(&self) -> Statement {
+        Statement::new(
+            "SELECT version,name,checksum FROM _lenso_migrations WHERE owner=?1 AND backend='d1' ORDER BY version",
+            vec![json!(self.owner)],
+        )
+    }
+
+    async fn history(&self, db: &impl Transport) -> Result<Option<Vec<AppliedMigration>>, Error> {
+        let rows = query(db, Self::ledger_query()).await?;
         if rows.is_empty() {
             return Ok(None);
         }
-        let rows = query(db, Statement::new("SELECT version,name,checksum FROM _lenso_migrations WHERE owner=?1 AND backend='d1' ORDER BY version", vec![json!(self.owner)])).await?;
+        Self::parse_history(query(db, self.history_query()).await?)
+    }
+
+    async fn verification_history(
+        &self,
+        db: &impl Transport,
+    ) -> Result<Option<Vec<AppliedMigration>>, Error> {
+        // Read existence and exact history in one primary batch. An absent ledger
+        // makes the history SELECT fail, so probe only that failure path to retain
+        // SetupRequired without treating other storage failures as missing setup.
+        let mut rows = match db
+            .batch(vec![Self::ledger_query(), self.history_query()])
+            .await
+        {
+            Ok(rows) => rows,
+            Err(Error::Transport) => {
+                if query(db, Self::ledger_query()).await?.is_empty() {
+                    return Ok(None);
+                }
+                return Err(Error::Transport);
+            }
+            Err(error) => return Err(error),
+        };
+        // This fixed two-statement batch is below the capacity limits. Validate
+        // its receipt separately so malformed results always remain Transport.
+        if rows.len() != 2 {
+            return Err(Error::Transport);
+        }
+        if rows.remove(0).is_empty() {
+            return Ok(None);
+        }
+        Self::parse_history(rows.remove(0))
+    }
+
+    fn parse_history(rows: Vec<Value>) -> Result<Option<Vec<AppliedMigration>>, Error> {
         if rows.is_empty() {
             return Ok(None);
         }
@@ -155,7 +196,10 @@ impl Plan {
 
     /// Read-only Ready gate: exact history and legacy marker, no setup or upgrade.
     pub async fn verify(&self, db: &impl Transport) -> Result<(), Error> {
-        let history = self.history(db).await?.ok_or(Error::SetupRequired)?;
+        let history = self
+            .verification_history(db)
+            .await?
+            .ok_or(Error::SetupRequired)?;
         if !self
             .common
             .status(&history)
