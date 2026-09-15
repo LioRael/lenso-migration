@@ -1,0 +1,23 @@
+[package]
+name = "lenso-migration-d1"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT"
+description = "Explicit owner-scoped D1 migration adapter for Lenso"
+repository = "https://github.com/LioRael/lenso-postgres-kit"
+
+[dependencies]
+lenso-migration = { version = "0.1.0", path = "../lenso-migration" }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+rusqlite = { version = "0.38", features = ["bundled"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+[lints.clippy]
+all = { level = "warn", priority = -1 }

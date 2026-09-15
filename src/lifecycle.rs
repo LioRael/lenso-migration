@@ -1,5 +1,7 @@
 use std::str::FromStr;
 
+use lenso_migration::{AppliedMigration, HistoryError, MigrationStatus};
+
 use sqlx::{
     AssertSqlSafe, Connection, PgConnection, PgPool, Postgres, Row, Transaction,
     postgres::{PgConnectOptions, PgPoolOptions},
@@ -110,7 +112,7 @@ impl SchemaOperator {
         match inspect_schema(&mut transaction, &self.plan).await? {
             SchemaState::Missing => {
                 create_managed_schema(&mut transaction, &self.plan).await?;
-                apply_migrations(&mut transaction, &self.plan, 0).await?;
+                apply_migrations(&mut transaction, &self.plan, self.plan.migrations()).await?;
                 transaction
                     .commit()
                     .await
@@ -124,8 +126,9 @@ impl SchemaOperator {
                 schema: self.plan.schema().to_owned(),
             }),
             SchemaState::Managed { applied } => {
-                let current = validate_history(&self.plan, &applied)?;
-                if current == self.plan.current_version() {
+                let status = validate_history(&self.plan, &applied)?;
+                let current = status.current_version;
+                if status.is_current() {
                     Ok(SetupOutcome::AlreadyCurrent { version: current })
                 } else {
                     Err(PostgresKitError::UpgradeRequired {
@@ -164,13 +167,14 @@ impl SchemaOperator {
             }
             SchemaState::Managed { applied } => applied,
         };
-        let current = validate_history(&self.plan, &applied)?;
-        if current == self.plan.current_version() {
+        let status = validate_history(&self.plan, &applied)?;
+        let current = status.current_version;
+        if status.is_current() {
             return Ok(UpgradeOutcome::AlreadyCurrent { version: current });
         }
 
-        let applied_count = self.plan.migrations().len() - applied.len();
-        apply_migrations(&mut transaction, &self.plan, applied.len()).await?;
+        let applied_count = status.pending.len();
+        apply_migrations(&mut transaction, &self.plan, status.pending).await?;
         transaction
             .commit()
             .await
@@ -190,13 +194,6 @@ enum SchemaState {
     Managed { applied: Vec<AppliedMigration> },
 }
 
-#[derive(Debug)]
-struct AppliedMigration {
-    version: u64,
-    name: String,
-    checksum: String,
-}
-
 async fn verify_pool(pool: &PgPool, plan: &SchemaPlan) -> Result<(), PostgresKitError> {
     let mut connection = pool
         .acquire()
@@ -210,8 +207,9 @@ async fn verify_pool(pool: &PgPool, plan: &SchemaPlan) -> Result<(), PostgresKit
             schema: plan.schema().to_owned(),
         }),
         SchemaState::Managed { applied } => {
-            let current = validate_history(plan, &applied)?;
-            if current == plan.current_version() {
+            let status = validate_history(plan, &applied)?;
+            let current = status.current_version;
+            if status.is_current() {
                 Ok(())
             } else {
                 Err(PostgresKitError::UpgradeRequired {
@@ -304,36 +302,18 @@ async fn inspect_schema(
 fn validate_history(
     plan: &SchemaPlan,
     applied: &[AppliedMigration],
-) -> Result<u64, PostgresKitError> {
-    if let Some(actual) = applied.iter().map(|migration| migration.version).max()
-        && actual > plan.current_version()
-    {
-        return Err(PostgresKitError::SchemaAhead {
+) -> Result<MigrationStatus, PostgresKitError> {
+    plan.status(applied).map_err(|error| match error {
+        HistoryError::HistoryDiverged { version } => PostgresKitError::HistoryDiverged {
+            schema: plan.schema().to_owned(),
+            version,
+        },
+        HistoryError::SchemaAhead { actual, expected } => PostgresKitError::SchemaAhead {
             schema: plan.schema().to_owned(),
             actual,
-            expected: plan.current_version(),
-        });
-    }
-
-    for (index, actual) in applied.iter().enumerate() {
-        let Some(expected) = plan.migrations().get(index) else {
-            return Err(PostgresKitError::SchemaAhead {
-                schema: plan.schema().to_owned(),
-                actual: actual.version,
-                expected: plan.current_version(),
-            });
-        };
-        if actual.version != expected.version()
-            || actual.name != expected.name()
-            || actual.checksum != expected.checksum()
-        {
-            return Err(PostgresKitError::HistoryDiverged {
-                schema: plan.schema().to_owned(),
-                version: actual.version,
-            });
-        }
-    }
-    Ok(applied.last().map_or(0, |migration| migration.version))
+            expected,
+        },
+    })
 }
 
 async fn acquire_schema_lock(
@@ -379,7 +359,7 @@ async fn create_managed_schema(
 async fn apply_migrations(
     transaction: &mut Transaction<'_, Postgres>,
     plan: &SchemaPlan,
-    skip: usize,
+    pending: &[Migration],
 ) -> Result<(), PostgresKitError> {
     let search_path = format!(
         "SET LOCAL search_path TO {}, pg_catalog",
@@ -391,7 +371,7 @@ async fn apply_migrations(
         .map_err(|error| PostgresKitError::database("select owned schema", error))?;
 
     let ledger = qualified_table(plan.schema(), LEDGER_TABLE);
-    for migration in plan.migrations().iter().skip(skip) {
+    for migration in pending {
         sqlx::raw_sql(migration.sql())
             .execute(&mut **transaction)
             .await

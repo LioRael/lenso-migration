@@ -255,6 +255,85 @@ async fn older_module_rejects_a_newer_schema() {
     cleanup(&admin, &[&schema]).await;
 }
 
+// This fixture represents a ledger written by the original 0.1.0 implementation.
+// Its checksum is a fixed historical value, not computed by the extracted core.
+#[tokio::test]
+#[ignore = "requires LENSO_POSTGRES_TEST_URL"]
+async fn legacy_ledger_prepares_and_upgrades_without_rewriting_history() {
+    let url = database_url();
+    let schema = unique_schema("legacy");
+    let admin = admin_pool(&url).await;
+    let legacy_checksum = "53f61844516ba5191fac9b3a1f51f594a33b60442c576f9e82a5a97c881dfd3b";
+    admin
+        .execute(AssertSqlSafe(format!(
+            "CREATE SCHEMA \"{schema}\";
+         CREATE TABLE \"{schema}\"._lenso_schema_migrations (
+             version bigint PRIMARY KEY CHECK (version > 0),
+             name text NOT NULL, checksum text NOT NULL,
+             applied_at timestamptz NOT NULL DEFAULT transaction_timestamp()
+         );
+         CREATE TABLE \"{schema}\".counters (name text PRIMARY KEY, value bigint NOT NULL);
+         INSERT INTO \"{schema}\"._lenso_schema_migrations (version, name, checksum)
+         VALUES (1, 'create-counters', '{legacy_checksum}')"
+        )))
+        .await
+        .unwrap();
+    let prepared = OwnedPostgres::prepare(&url, SchemaPlan::new(schema.clone(), V1).unwrap())
+        .await
+        .unwrap();
+    prepared.pool().close().await;
+    let plan = SchemaPlan::new(schema.clone(), V2).unwrap();
+    assert_eq!(
+        SchemaOperator::connect(&url, plan.clone())
+            .await
+            .unwrap()
+            .upgrade()
+            .await
+            .unwrap(),
+        UpgradeOutcome::Applied {
+            from: 1,
+            to: 2,
+            applied: 1
+        }
+    );
+    let checksum: String = sqlx::query_scalar(AssertSqlSafe(format!(
+        "SELECT checksum FROM \"{schema}\"._lenso_schema_migrations WHERE version = 1"
+    )))
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(checksum, legacy_checksum);
+    let prepared = OwnedPostgres::prepare(&url, plan).await.unwrap();
+    prepared.pool().close().await;
+    cleanup(&admin, &[&schema]).await;
+}
+
+#[tokio::test]
+#[ignore = "requires LENSO_POSTGRES_TEST_URL"]
+async fn ledger_gap_blocks_prepare_and_upgrade() {
+    let url = database_url();
+    let schema = unique_schema("gap");
+    let admin = admin_pool(&url).await;
+    let plan = SchemaPlan::new(schema.clone(), V2).unwrap();
+    let operator = SchemaOperator::connect(&url, plan.clone()).await.unwrap();
+    operator.setup().await.unwrap();
+    admin
+        .execute(AssertSqlSafe(format!(
+            "DELETE FROM \"{schema}\"._lenso_schema_migrations WHERE version = 1"
+        )))
+        .await
+        .unwrap();
+    assert!(matches!(
+        OwnedPostgres::prepare(&url, plan).await.unwrap_err(),
+        PostgresKitError::HistoryDiverged { version: 2, .. }
+    ));
+    assert!(matches!(
+        operator.upgrade().await.unwrap_err(),
+        PostgresKitError::HistoryDiverged { version: 2, .. }
+    ));
+    cleanup(&admin, &[&schema]).await;
+}
+
 fn database_url() -> String {
     std::env::var("LENSO_POSTGRES_TEST_URL")
         .expect("LENSO_POSTGRES_TEST_URL must be set for ignored acceptance tests")

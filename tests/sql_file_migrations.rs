@@ -4,12 +4,12 @@ const MIGRATIONS: &[Migration] = sql_migrations![
     (
         1,
         "create-orders",
-        "tests/fixtures/migrations/001_create_orders.sql"
+        "tests/fixtures/migrations/postgres/001_create_orders.sql"
     ),
     (
         2,
         "add-order-status",
-        "tests/fixtures/migrations/002_add_order_status.sql"
+        "tests/fixtures/migrations/postgres/002_add_order_status.sql"
     ),
 ];
 
