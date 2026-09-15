@@ -10,38 +10,6 @@ mod lifecycle;
 mod plan;
 
 pub use error::{PostgresKitError, SetupOutcome, UpgradeOutcome};
+pub use lenso_migration::{Migration, sql_migrations};
 pub use lifecycle::{OwnedPostgres, SchemaOperator};
-pub use plan::{Migration, PlanError, SchemaPlan};
-
-/// Declares immutable migrations whose SQL bodies live in dedicated files.
-///
-/// Paths are resolved from the owning crate's `CARGO_MANIFEST_DIR`. Keeping the
-/// ordered version and stable name explicit makes review and checksum drift
-/// behavior unchanged.
-///
-/// ```ignore
-/// use lenso_postgres_kit::{Migration, sql_migrations};
-///
-/// const MIGRATIONS: &[Migration] = sql_migrations![
-///     (1, "create-orders", "migrations/001_create_orders.sql"),
-///     (2, "add-order-status", "migrations/002_add_order_status.sql"),
-/// ];
-/// ```
-#[macro_export]
-macro_rules! sql_migrations {
-    (
-        $(
-            ($version:literal, $name:literal, $path:literal $(,)?)
-        ),+ $(,)?
-    ) => {
-        &[
-            $(
-                $crate::Migration::new(
-                    $version,
-                    $name,
-                    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/", $path)),
-                ),
-            )+
-        ]
-    };
-}
+pub use plan::{PlanError, SchemaPlan};

@@ -18,17 +18,36 @@ The kit supplies:
 - fail-closed runtime preparation that never migrates automatically;
 - a verified SQLx pool with the Plugin schema selected as its `search_path`.
 
+## Shared migration core
+
+The workspace's independent `lenso-migration` crate owns immutable definitions,
+legacy-compatible SHA-256 checksums, ordered plan validation, and applied-history
+status/pending calculation. `lenso-postgres-kit` reexports `Migration` and
+`sql_migrations!` and retains its existing `SchemaPlan` and error API.
+
+PostgreSQL schema names, roles, advisory locks, SQLx pools, ledger I/O and
+transactions stay here. Setup and upgrade remain explicit operator actions;
+runtime preparation still only verifies. Existing ledger names, columns,
+checksums, and SQL execution semantics are unchanged.
+
+A Plugin targeting multiple databases owns separate `migrations/postgres/` and
+`migrations/d1/` plans and separate backend ledgers. Shared version numbers do not
+imply interchangeable SQL or permission to replay one backend's history on
+another. Moving SQL files is safe only when their exact bytes, version and name
+remain unchanged.
+
 ## Author one owned schema
 
-Keep SQL in the owning Plugin's `migrations/` directory and include it in the
+Keep SQL in the owning Plugin's `migrations/postgres/` directory and include it in the
 binary at compile time. The Rust declaration remains the explicit ordered
 schema plan; the SQL body stays reviewable as SQL:
 
 ```text
 orders-module/
 ├── migrations/
-│   ├── 001_create_orders.sql
-│   └── 002_add_order_status.sql
+│   └── postgres/
+│       ├── 001_create_orders.sql
+│       └── 002_add_order_status.sql
 └── src/
     └── lib.rs
 ```
@@ -42,12 +61,12 @@ const MIGRATIONS: &[Migration] = sql_migrations![
     (
         1,
         "create-orders",
-        "migrations/001_create_orders.sql",
+        "migrations/postgres/001_create_orders.sql",
     ),
     (
         2,
         "add-order-status",
-        "migrations/002_add_order_status.sql",
+        "migrations/postgres/002_add_order_status.sql",
     ),
 ];
 
@@ -93,8 +112,15 @@ calls and application-level coordination, not in shared SQL transactions.
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy --locked --all-targets --all-features -- -D warnings
-cargo test --locked --all-features
+cargo clippy --workspace --locked --all-targets --all-features -- -D warnings
+cargo check --locked -p lenso-migration --target wasm32-unknown-unknown
+cargo test --workspace --locked --all-features
 LENSO_POSTGRES_TEST_URL=postgres://... \
   cargo test --locked --test postgres_acceptance -- --ignored
 ```
+
+The independent [D1 adapter](crates/lenso-migration-d1/README.md) consumes the same
+core history model through an injected primary-batch transport. It provides
+explicit setup, upgrade and legacy adoption while keeping runtime verification
+read-only. Its lifecycle tests include rollback, concurrent-state guards and
+long migration histories.

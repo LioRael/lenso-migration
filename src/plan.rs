@@ -1,64 +1,15 @@
 use std::{fmt, sync::Arc};
 
-use sha2::{Digest, Sha256};
+use lenso_migration::MigrationPlan;
 use thiserror::Error;
 
-/// One immutable, ordered migration owned by a Plugin.
-#[derive(Clone, Copy)]
-pub struct Migration {
-    version: u64,
-    name: &'static str,
-    sql: &'static str,
-}
-
-impl Migration {
-    /// Defines one migration. Validation happens when constructing a [`SchemaPlan`].
-    pub const fn new(version: u64, name: &'static str, sql: &'static str) -> Self {
-        Self { version, name, sql }
-    }
-
-    /// Returns the monotonic migration version.
-    pub const fn version(&self) -> u64 {
-        self.version
-    }
-
-    /// Returns the stable migration name.
-    pub const fn name(&self) -> &'static str {
-        self.name
-    }
-
-    /// Returns the SQL applied inside the owned migration transaction.
-    pub const fn sql(&self) -> &'static str {
-        self.sql
-    }
-
-    pub(crate) fn checksum(&self) -> String {
-        let mut digest = Sha256::new();
-        digest.update(self.version.to_be_bytes());
-        digest.update([0]);
-        digest.update(self.name.as_bytes());
-        digest.update([0]);
-        digest.update(self.sql.as_bytes());
-        hex::encode(digest.finalize())
-    }
-}
-
-impl fmt::Debug for Migration {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Migration")
-            .field("version", &self.version)
-            .field("name", &self.name)
-            .field("checksum", &self.checksum())
-            .finish_non_exhaustive()
-    }
-}
+use crate::Migration;
 
 /// An immutable description of one Plugin-owned `PostgreSQL` schema.
 #[derive(Clone)]
 pub struct SchemaPlan {
     schema: Arc<str>,
-    migrations: &'static [Migration],
+    plan: MigrationPlan,
 }
 
 impl SchemaPlan {
@@ -69,8 +20,15 @@ impl SchemaPlan {
     ) -> Result<Self, PlanError> {
         let schema = schema.into();
         validate_schema_name(&schema)?;
-        validate_migrations(migrations)?;
-        Ok(Self { schema, migrations })
+        let plan = MigrationPlan::new(migrations).map_err(PlanError::from)?;
+        for migration in plan.migrations() {
+            if i64::try_from(migration.version()).is_err() {
+                return Err(PlanError::MigrationVersionTooLarge {
+                    version: migration.version(),
+                });
+            }
+        }
+        Ok(Self { schema, plan })
     }
 
     /// Returns the `PostgreSQL` schema name owned by the Plugin.
@@ -80,11 +38,20 @@ impl SchemaPlan {
 
     /// Returns the current version declared by the Plugin.
     pub fn current_version(&self) -> u64 {
-        self.migrations.last().map_or(0, Migration::version)
+        self.plan.current_version()
     }
 
     pub(crate) const fn migrations(&self) -> &'static [Migration] {
-        self.migrations
+        self.plan.migrations()
+    }
+}
+
+impl SchemaPlan {
+    pub(crate) fn status(
+        &self,
+        applied: &[lenso_migration::AppliedMigration],
+    ) -> Result<lenso_migration::MigrationStatus, lenso_migration::HistoryError> {
+        self.plan.status(applied)
     }
 }
 
@@ -94,7 +61,7 @@ impl fmt::Debug for SchemaPlan {
             .debug_struct("SchemaPlan")
             .field("schema", &self.schema)
             .field("current_version", &self.current_version())
-            .field("migration_count", &self.migrations.len())
+            .field("migration_count", &self.plan.migrations().len())
             .finish()
     }
 }
@@ -137,43 +104,27 @@ fn validate_schema_name(schema: &str) -> Result<(), PlanError> {
     }
 }
 
-fn validate_migrations(migrations: &[Migration]) -> Result<(), PlanError> {
-    if migrations.is_empty() {
-        return Err(PlanError::EmptyMigrations);
-    }
-
-    for (index, migration) in migrations.iter().enumerate() {
-        let expected = u64::try_from(index).expect("migration index fits u64") + 1;
-        if migration.version != expected {
-            return Err(PlanError::NonContiguousVersion {
-                name: migration.name,
+impl From<lenso_migration::PlanError> for PlanError {
+    fn from(error: lenso_migration::PlanError) -> Self {
+        match error {
+            lenso_migration::PlanError::EmptyMigrations => Self::EmptyMigrations,
+            lenso_migration::PlanError::NonContiguousVersion {
+                name,
                 expected,
-                actual: migration.version,
-            });
-        }
-        if i64::try_from(migration.version).is_err() {
-            return Err(PlanError::MigrationVersionTooLarge {
-                version: migration.version,
-            });
-        }
-        let mut bytes = migration.name.bytes();
-        let valid_start = bytes.next().is_some_and(|byte| byte.is_ascii_lowercase());
-        let valid_rest = bytes.all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
-        });
-        if migration.name.len() > 128 || !valid_start || !valid_rest {
-            return Err(PlanError::InvalidMigrationName {
-                version: migration.version,
-                name: migration.name,
-            });
-        }
-        if migration.sql.trim().is_empty() {
-            return Err(PlanError::EmptyMigrationSql {
-                version: migration.version,
-            });
+                actual,
+            } => Self::NonContiguousVersion {
+                name,
+                expected,
+                actual,
+            },
+            lenso_migration::PlanError::InvalidMigrationName { version, name } => {
+                Self::InvalidMigrationName { version, name }
+            }
+            lenso_migration::PlanError::EmptyMigrationSql { version } => {
+                Self::EmptyMigrationSql { version }
+            }
         }
     }
-    Ok(())
 }
 
 #[cfg(test)]
