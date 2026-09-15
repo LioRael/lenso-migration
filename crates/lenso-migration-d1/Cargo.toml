@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.94"
 license = "MIT"
 description = "Explicit owner-scoped D1 migration adapter for Lenso"
-repository = "https://github.com/LioRael/lenso-postgres-kit"
+repository = "https://github.com/LioRael/lenso-migration"
 
 [dependencies]
 lenso-migration = { version = "0.1.0", path = "../lenso-migration" }
